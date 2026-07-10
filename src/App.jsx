@@ -44,6 +44,8 @@ const ROUND_LABEL = { hr: 'HR面试', business_1st: '业务一面', business_2nd
 
 const inputStyle = { borderColor: COLORS.line };
 const AUTH_STORAGE_KEY = 'naxian_hr_auth';
+const BACKEND_URL_STORAGE_KEY = 'naxian_backend_url';
+const BUILT_IN_BACKEND_URL = import.meta.env.VITE_BACKEND_URL || '';
 
 function loadAuthFromStorage() {
   try {
@@ -58,6 +60,13 @@ function saveAuthToStorage(state) {
 }
 function clearAuthFromStorage() {
   try { localStorage.removeItem(AUTH_STORAGE_KEY); } catch (e) { /* ignore */ }
+}
+function loadSavedBackendUrl() {
+  if (BUILT_IN_BACKEND_URL) return BUILT_IN_BACKEND_URL; // 部署时固定写死的话，用户完全不需要填
+  try { return localStorage.getItem(BACKEND_URL_STORAGE_KEY) || ''; } catch (e) { return ''; }
+}
+function saveBackendUrl(url) {
+  try { localStorage.setItem(BACKEND_URL_STORAGE_KEY, url); } catch (e) { /* ignore */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -95,6 +104,8 @@ function createApiClient(backendUrl, token) {
   return {
     health: () => pub('/health'),
     login: (email, password) => pub('/auth/login', { method: 'POST', body: { email, password } }),
+    feishuLogin: (code) => pub('/auth/feishu-login', { method: 'POST', body: { code } }),
+    feishuConfig: () => pub('/auth/feishu-config'),
     bootstrapAdmin: (setupKey, email, password, name) =>
       pub('/auth/bootstrap-admin', { method: 'POST', body: { setupKey, email, password, name } }),
 
@@ -127,6 +138,7 @@ function createApiClient(backendUrl, token) {
 
     listUsers: () => call('/users'),
     createUser: (data) => call('/users', { method: 'POST', body: data }),
+    updateUserRole: (id, role) => call(`/users/${id}/role`, { method: 'PUT', body: { role } }),
   };
 }
 
@@ -182,6 +194,8 @@ function LoginScreen({ savedBackendUrl, onLoggedIn, showToast }) {
   const [mode, setMode] = useState('login'); // 'login' | 'bootstrap'
   const [busy, setBusy] = useState(false);
   const [form, setForm] = useState({ email: '', password: '', name: '', setupKey: '' });
+  const [feishuAppId, setFeishuAppId] = useState(null);
+  const [feishuAutoTrying, setFeishuAutoTrying] = useState(false);
 
   const checkBackend = async () => {
     if (!backendUrl.trim()) return;
@@ -189,12 +203,70 @@ function LoginScreen({ savedBackendUrl, onLoggedIn, showToast }) {
     try {
       const api = createApiClient(backendUrl.trim(), null);
       await api.health();
+      saveBackendUrl(backendUrl.trim());
       setStep('auth');
     } catch (e) {
       showToast('连不上这个地址：' + e.message, 'error');
     } finally {
       setBusy(false);
     }
+  };
+
+  // 一旦知道后端地址，就去查有没有配飞书、并尝试飞书免登/扫码回跳
+  useEffect(() => {
+    if (step !== 'auth' || !backendUrl) return;
+    (async () => {
+      const api = createApiClient(backendUrl, null);
+      let appId = null;
+      try {
+        const cfg = await api.feishuConfig();
+        appId = cfg.appId;
+        setFeishuAppId(appId);
+      } catch (e) { /* 拿不到配置就当没配飞书，走普通登录 */ }
+      if (!appId) return;
+
+      // 情况一：从飞书扫码登录跳转回来，URL上带着 code 参数
+      const urlCode = new URLSearchParams(window.location.search).get('code');
+      if (urlCode) {
+        setFeishuAutoTrying(true);
+        try {
+          const result = await api.feishuLogin(urlCode);
+          window.history.replaceState({}, '', window.location.pathname); // 清掉URL上的code
+          onLoggedIn(backendUrl, result.accessToken, result.user);
+          return;
+        } catch (e) {
+          showToast('飞书登录失败：' + e.message, 'error');
+          setFeishuAutoTrying(false);
+        }
+        return;
+      }
+
+      // 情况二：在飞书客户端内打开（h5sdk存在），走免登，全程不需要用户操作
+      if (window.h5sdk && window.tt) {
+        setFeishuAutoTrying(true);
+        window.h5sdk.error((err) => { console.warn('h5sdk error', err); setFeishuAutoTrying(false); });
+        window.h5sdk.ready(() => {
+          window.tt.requestAuthCode({
+            appId,
+            success: async (res) => {
+              try {
+                const result = await api.feishuLogin(res.code);
+                onLoggedIn(backendUrl, result.accessToken, result.user);
+              } catch (e) {
+                showToast('飞书登录失败：' + e.message, 'error');
+                setFeishuAutoTrying(false);
+              }
+            },
+            fail: () => setFeishuAutoTrying(false),
+          });
+        });
+      }
+    })();
+  }, [step, backendUrl]);
+
+  const goFeishuQrLogin = () => {
+    const redirectUri = encodeURIComponent(window.location.origin + window.location.pathname);
+    window.location.href = `https://open.feishu.cn/open-apis/authen/v1/index?app_id=${feishuAppId}&redirect_uri=${redirectUri}`;
   };
 
   const submitLogin = async () => {
@@ -222,6 +294,17 @@ function LoginScreen({ savedBackendUrl, onLoggedIn, showToast }) {
       setBusy(false);
     }
   };
+
+  if (feishuAutoTrying) {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-4 ui-body" style={{ background: COLORS.ink }}>
+        <style>{FONT_STYLE}</style>
+        <div className="flex items-center gap-2" style={{ color: '#fff' }}>
+          <Loader2 size={18} className="animate-spin" />正在通过飞书登录…
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex items-center justify-center p-4 ui-body" style={{ background: COLORS.ink }}>
@@ -253,6 +336,20 @@ function LoginScreen({ savedBackendUrl, onLoggedIn, showToast }) {
 
         {step === 'auth' && (
           <div className="flex flex-col gap-3">
+            {feishuAppId && (
+              <>
+                <button
+                  onClick={goFeishuQrLogin}
+                  className="flex items-center justify-center gap-1 text-sm px-3 py-2 rounded-md text-white" style={{ background: COLORS.teal }}
+                >用飞书扫码登录</button>
+                <div className="flex items-center gap-2 ui-mono text-xs" style={{ color: COLORS.textMuted }}>
+                  <div className="flex-1 h-px" style={{ background: COLORS.line }} />
+                  或用邮箱密码
+                  <div className="flex-1 h-px" style={{ background: COLORS.line }} />
+                </div>
+              </>
+            )}
+
             <div className="flex gap-2 mb-1">
               <button onClick={() => setMode('login')} className="flex-1 ui-mono text-xs px-2 py-1.5 rounded-md"
                 style={{ background: mode === 'login' ? COLORS.amber : COLORS.paper, color: mode === 'login' ? COLORS.ink : COLORS.textMuted }}>登录</button>
@@ -284,7 +381,7 @@ function LoginScreen({ savedBackendUrl, onLoggedIn, showToast }) {
                 </button>
               </>
             )}
-            <button onClick={() => setStep('url')} className="ui-mono text-xs mt-1" style={{ color: COLORS.textMuted }}>换一个后端地址</button>
+            {!BUILT_IN_BACKEND_URL && <button onClick={() => setStep('url')} className="ui-mono text-xs mt-1" style={{ color: COLORS.textMuted }}>换一个后端地址</button>}
           </div>
         )}
       </div>
@@ -944,6 +1041,90 @@ function InterviewerView({ currentUser, positions, api, showToast }) {
 }
 
 // ---------------------------------------------------------------------------
+// 账号管理（管理员专属）
+// ---------------------------------------------------------------------------
+const ROLE_LABEL = { admin: '管理员', hr: 'HR', dept: '用人部门', interviewer: '业务面试官' };
+
+function CreateAccountModal({ onClose, onSubmit }) {
+  const [form, setForm] = useState({ email: '', password: '', name: '', role: 'hr' });
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(20,26,32,0.45)' }} onClick={onClose}>
+      <div className="w-full max-w-md rounded-lg p-5" style={{ background: '#fff' }} onClick={(e) => e.stopPropagation()}>
+        <h3 className="ui-display text-lg mb-1" style={{ color: COLORS.text }}>手动创建账号</h3>
+        <p className="ui-mono text-xs mb-3" style={{ color: COLORS.textMuted }}>如果对方还没通过飞书登录过，可以先手动开一个邮箱密码账号</p>
+        <div className="flex flex-col gap-2">
+          <input placeholder="邮箱" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className="ui-body text-sm border rounded px-2 py-1.5" style={inputStyle} />
+          <input placeholder="姓名" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="ui-body text-sm border rounded px-2 py-1.5" style={inputStyle} />
+          <input placeholder="初始密码（至少8位）" type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} className="ui-body text-sm border rounded px-2 py-1.5" style={inputStyle} />
+          <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} className="ui-body text-sm border rounded px-2 py-1.5" style={inputStyle}>
+            {Object.entries(ROLE_LABEL).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+          </select>
+        </div>
+        <div className="flex justify-end gap-2 mt-4">
+          <button onClick={onClose} className="text-sm px-3 py-1.5 rounded-md ui-body" style={{ color: COLORS.textMuted }}>取消</button>
+          <button disabled={!form.email || !form.name || form.password.length < 8} onClick={() => onSubmit(form)} className="text-sm px-3 py-1.5 rounded-md text-white ui-body disabled:opacity-40" style={{ background: COLORS.ink }}>创建</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function UsersView({ api, showToast }) {
+  const [users, setUsers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showModal, setShowModal] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try { setUsers(await api.listUsers()); }
+    catch (e) { showToast('加载账号列表失败：' + e.message, 'error'); }
+    finally { setLoading(false); }
+  }, [api]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const changeRole = async (id, role) => {
+    try { await api.updateUserRole(id, role); showToast('角色已更新', 'success'); load(); }
+    catch (e) { showToast('更新失败：' + e.message, 'error'); }
+  };
+
+  const createAccount = async (form) => {
+    try { await api.createUser(form); showToast('账号已创建', 'success'); setShowModal(false); load(); }
+    catch (e) { showToast('创建失败：' + e.message, 'error'); }
+  };
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex items-center justify-between">
+        <h2 className="ui-display text-xl" style={{ color: COLORS.text }}>账号管理</h2>
+        <button onClick={() => setShowModal(true)} className="flex items-center gap-1 text-sm px-3 py-1.5 rounded-md text-white ui-body" style={{ background: COLORS.ink }}><Plus size={14} />手动创建账号</button>
+      </div>
+      <p className="ui-body text-sm" style={{ color: COLORS.textMuted }}>
+        通过飞书登录会自动开一个"用人部门"权限的账号（最低权限，安全默认值），需要你在这里把它改成正确的角色，比如HR。
+      </p>
+      {loading ? <Spinner /> : (
+        <div className="flex flex-col gap-2">
+          {users.map((u) => (
+            <div key={u.id} className="rounded-lg p-3 flex items-center justify-between gap-3 flex-wrap" style={{ background: '#fff', border: `1px solid ${COLORS.line}` }}>
+              <div>
+                <div className="ui-body text-sm font-medium" style={{ color: COLORS.text }}>{u.name} <span style={{ color: COLORS.textMuted }}>· {u.email}</span></div>
+                <div className="ui-mono text-xs mt-0.5" style={{ color: COLORS.textMuted }}>
+                  {u.feishuOpenId ? '飞书免登账号' : '手动创建账号'}
+                </div>
+              </div>
+              <select value={u.role} onChange={(e) => changeRole(u.id, e.target.value)} className="ui-body text-sm border rounded px-2 py-1.5" style={inputStyle}>
+                {Object.entries(ROLE_LABEL).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+              </select>
+            </div>
+          ))}
+        </div>
+      )}
+      {showModal && <CreateAccountModal onClose={() => setShowModal(false)} onSubmit={createAccount} />}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // App Root
 // ---------------------------------------------------------------------------
 export default function App() {
@@ -1011,7 +1192,7 @@ export default function App() {
   }
 
   if (!authState) {
-    return <LoginScreen savedBackendUrl="" onLoggedIn={handleLoggedIn} showToast={showToast} />;
+    return <LoginScreen savedBackendUrl={loadSavedBackendUrl()} onLoggedIn={handleLoggedIn} showToast={showToast} />;
   }
 
   const { user } = authState;
@@ -1034,6 +1215,12 @@ export default function App() {
                     <Icon size={16} />{label}
                   </button>
                 ))}
+                {user.role === 'admin' && (
+                  <button onClick={() => { setRole('hr'); setHrTab('users'); }} className="flex items-center gap-2 px-3 py-2 rounded-md text-left ui-body text-sm"
+                    style={{ background: role === 'hr' && hrTab === 'users' ? COLORS.amber : 'transparent', color: role === 'hr' && hrTab === 'users' ? COLORS.ink : '#9AA5AF' }}>
+                    <ShieldCheck size={16} />账号管理
+                  </button>
+                )}
               </>
             )}
             {user.role === 'dept' && (
@@ -1057,12 +1244,13 @@ export default function App() {
           {(user.role === 'hr' || user.role === 'admin') && (
             <>
               <div className="flex md:hidden gap-2 mb-4 overflow-x-auto">
-                {[['positions', '职位'], ['pipeline', 'Pipeline'], ['offers', 'Offer']].map(([key, label]) => (
+                {[['positions', '职位'], ['pipeline', 'Pipeline'], ['offers', 'Offer'], ...(user.role === 'admin' ? [['users', '账号']] : [])].map(([key, label]) => (
                   <button key={key} onClick={() => setHrTab(key)} className="ui-mono text-xs px-3 py-1 rounded-full flex-shrink-0"
                     style={{ background: hrTab === key ? COLORS.amber : '#fff', color: hrTab === key ? COLORS.ink : COLORS.textMuted, border: `1px solid ${COLORS.line}` }}>{label}</button>
                 ))}
               </div>
               {hrTab === 'positions' && <PositionsView positions={positions} loading={loadingPositions} busy={busy} setBusyFlag={setBusyFlag} api={api} showToast={showToast} refresh={refreshPositions} />}
+              {hrTab === 'users' && <UsersView api={api} showToast={showToast} />}
               {hrTab === 'pipeline' && <PipelineView resumes={resumes} positions={positions} loading={loadingResumes} api={api} showToast={showToast} refresh={refreshResumes} onOpen={setSelectedResumeId} />}
               {hrTab === 'offers' && (
                 <div className="flex flex-col gap-4">
