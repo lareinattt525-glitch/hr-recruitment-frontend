@@ -385,6 +385,11 @@ function LoginScreen({ savedBackendUrl, onLoggedIn, showToast }) {
           </div>
         )}
       </div>
+      <div style={{ position: 'absolute', bottom: 16 }}>
+        <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer" className="ui-mono text-xs" style={{ color: '#6B7680', textDecoration: 'none' }}>
+          沪ICP备2026034904号-1
+        </a>
+      </div>
     </div>
   );
 }
@@ -1124,6 +1129,7 @@ function UsersView({ api, showToast }) {
   );
 }
 
+
 // ---------------------------------------------------------------------------
 // App Root
 // ---------------------------------------------------------------------------
@@ -1230,8 +1236,11 @@ export default function App() {
               <button className="flex items-center gap-2 px-3 py-2 rounded-md text-left ui-body text-sm" style={{ background: COLORS.amber, color: COLORS.ink }}><UserCheck size={16} />推送给我的候选人</button>
             )}
           </div>
-          <div className="mt-auto p-4">
+          <div className="mt-auto p-4 flex flex-col gap-2">
             <button onClick={handleLogout} className="flex items-center gap-2 ui-body text-sm" style={{ color: '#9AA5AF' }}><LogOut size={14} />退出登录</button>
+            <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer" className="ui-mono text-xs" style={{ color: '#5F6971', textDecoration: 'none' }}>
+              沪ICP备2026034904号-1
+            </a>
           </div>
         </aside>
 
